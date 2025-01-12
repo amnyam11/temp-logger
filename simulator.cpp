@@ -61,10 +61,12 @@ int main(int argc, char** argv)
 
     std::string mystr;
     for (;;) {
-        mystr = std::string("Iteration ") + to_string(random_number());
+        mystr = to_string(random_number());
         smport << mystr;
-        csleep(1.0);
+        csleep(60.0);
     }
 
     return 0;
 }
+
+
