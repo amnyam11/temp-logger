@@ -19,6 +19,7 @@ const int MAX_TIME_HOUR = 30 * 24 * 60 * 60;
 const int MAX_TIME_DAY = 365 * 24 * 60 * 60;
 const int HOUR = 60 * 60;
 const int DAY = 24 * 60 * 60;
+const double TIME_DELAY = 10.0;
 
 template<class T> std::string to_string(const T& v)
 {
@@ -185,7 +186,7 @@ int main(int argc, char** argv)
     std::string avg_hour_str;
     std::string avg_day_str;
     
-    smport.SetTimeout(60.0);
+    smport.SetTimeout(TIME_DELAY);
 
     int counter_avg_hour = 0;
     int counter_avg_day = 0;

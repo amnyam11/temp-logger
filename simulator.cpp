@@ -1,8 +1,10 @@
 #include "my_serial.hpp"
-#include <sstream>              // std::stringstream
-#include <iostream>             // std::cout
+#include <sstream>              
+#include <iostream>             
 #include <random>
 #include <ctime>
+
+const double TIME_DELAY = 10.0;
 
 template<class T> std::string to_string(const T& v)
 {
@@ -33,13 +35,11 @@ double random_number() {
     static std::random_device rd;  // Источник случайных чисел (seed)
     static std::mt19937 gen(rd()); // Генератор Mersenne Twister
 
-    // Определение диапазона [a, b]
+
     std::uniform_real_distribution<> distrib(20.0, 30.0);
 
-    // Генерация случайного double в диапазоне [a, b]
     double random_value = distrib(gen);
 
-    // Округление до десятых
     random_value = std::round(random_value * 10) / 10;
 
     return random_value;
@@ -63,7 +63,7 @@ int main(int argc, char** argv)
     for (;;) {
         mystr = to_string(random_number());
         smport << mystr;
-        csleep(60.0);
+        csleep(TIME_DELAY);
     }
 
     return 0;
