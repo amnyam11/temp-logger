@@ -1,34 +1,44 @@
 #include "my_serial.hpp"
-
-#include <iostream>  
-#include <fstream>   
-#include <sstream>   
-#include <string>   
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 #include <iomanip>
-#include <random>
+#include <ctime>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+
 #ifdef _WIN32
-#include <windows.h> 
+#include <windows.h>
 #else
-#include <sys/time.h> 
-#include <ctime>      
+#include <sys/time.h>
 #endif
 
-const int MAX_TIME_DEFAULT = 24 * 60 * 60;
-const int MAX_TIME_HOUR = 30 * 24 * 60 * 60;
-const int MAX_TIME_DAY = 365 * 24 * 60 * 60;
-const int HOUR = 60 * 60;
-const int DAY = 24 * 60 * 60;
-const double TIME_DELAY = 10.0;
+// Глобальные переменные для хранения логов в памяти
+std::mutex log_mutex;
+std::deque<std::string> log_temp_memory;          // Основной лог температур
+std::deque<std::string> log_avg_temp_hour_memory; // Лог средних значений за час
+std::deque<std::string> log_avg_temp_day_memory;  // Лог средних значений за день
 
-template<class T> std::string to_string(const T& v)
-{
+// Константы
+const int MAX_TIME_DEFAULT = 24 * 60 * 60; // Максимальное время хранения записей в основном логе (24 часа)
+const int MAX_TIME_HOUR = 30 * 24 * 60 * 60; // Максимальное время хранения записей в логе за час (30 дней)
+const int MAX_TIME_DAY = 365 * 24 * 60 * 60; // Максимальное время хранения записей в логе за день (1 год)
+const int HOUR = 60 * 60;                   // Количество секунд в часе
+const int DAY = 24 * 60 * 60;               // Количество секунд в дне
+const double TIME_DELAY = 10.0;             // Таймаут для чтения данных
+
+// Функция для преобразования любого типа в строку
+template<class T>
+std::string to_string(const T& v) {
     std::ostringstream ss;
     ss << v;
     return ss.str();
 }
 
-// Время в формате "YYYY-MM-DD HH:MM:SS.MS"
+// Получение текущего времени в формате "YYYY-MM-DD HH:MM:SS.MS"
 std::string getCurrentTime() {
     std::ostringstream oss;
 
@@ -68,80 +78,64 @@ bool parseTime(const std::string& time_str, std::tm& tm) {
     return true;
 }
 
-// Функция очистки лог-файла от старых записей (старше max_age_seconds)
-void cleanOldEntries(const std::string& logfile_name, int max_age_seconds) {
-    std::ifstream logfile(logfile_name);
-    if (!logfile.is_open()) {
-        std::cerr << "Failed to open log file for cleaning!" << std::endl;
-        return;
-    }
-
-    std::vector<std::string> lines;
-    std::string line;
-    std::time_t now = std::time(nullptr);
-
-    while (std::getline(logfile, line)) {
-        std::tm tm = {};
-        if (parseTime(line.substr(0, 19), tm)) {
-            std::time_t entry_time = std::mktime(&tm);
-            if (now - entry_time < max_age_seconds) {
-                lines.push_back(line);
-            }
-        }
-    }
-
-    logfile.close();
-
-    std::ofstream outfile(logfile_name);
-    if (!outfile.is_open()) {
-        std::cerr << "Failed to open log file for writing!" << std::endl;
-        return;
-    }
-
-    for (const auto& l : lines) {
-        outfile << l << std::endl;
-    }
+// Запись в лог (в память)
+void writeToLog(const std::string& message, std::deque<std::string>& log_memory) {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    log_memory.push_back(getCurrentTime() + ": " + message);
 }
 
-void writeToLog(const std::string& message, std::string log_file_name) {
+// Синхронизация лога с диском
+void syncLogToDisk(const std::deque<std::string>& log_memory, const std::string& log_file_name) {
+    std::lock_guard<std::mutex> lock(log_mutex);
     std::ofstream logFile(log_file_name, std::ios::app);
     if (logFile.is_open()) {
-        std::string currentTime = getCurrentTime();
-        logFile << currentTime + ": " + message << std::endl;
+        for (const auto& entry : log_memory) {
+            logFile << entry << std::endl;
+        }
         logFile.close();
     } else {
-        std::cerr << "Failed to open log file." << std::endl;
+        std::cerr << "Failed to open log file: " << log_file_name << std::endl;
     }
 }
 
-// Функция для вычисления среднего значения температуры за последние max_age_seconds
-double calculateAverageTemperature(const std::string& logfile_name, int max_age_seconds) {
-    std::ifstream logfile(logfile_name);
-    if (!logfile.is_open()) {
-        std::cerr << "Failed to open log file for reading!" << std::endl;
-        return 0.0;
-    }
-
-    std::vector<double> temperatures;
-    std::string line;
+// Очистка старых записей в логе (в памяти)
+void cleanOldEntries(std::deque<std::string>& log_memory, int max_age_seconds) {
+    std::lock_guard<std::mutex> lock(log_mutex);
     std::time_t now = std::time(nullptr);
-
-    while (std::getline(logfile, line)) {
+    while (!log_memory.empty()) {
         std::tm tm = {};
-        if (parseTime(line.substr(0, 19), tm)) {
+        if (parseTime(log_memory.front().substr(0, 19), tm)) {
             std::time_t entry_time = std::mktime(&tm);
             if (now - entry_time < max_age_seconds) {
-                size_t colon_pos = line.find_last_of(":");
+                break;
+            }
+        }
+        log_memory.pop_front();
+    }
+}
+
+// Вычисление среднего значения температуры за последние max_age_seconds
+double calculateAverageTemperature(const std::deque<std::string>& log_memory, int max_age_seconds) {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::time_t now = std::time(nullptr);
+    double sum = 0.0;
+    int count = 0;
+
+    for (const auto& entry : log_memory) {
+        std::tm tm = {};
+        if (parseTime(entry.substr(0, 19), tm)) {
+            std::time_t entry_time = std::mktime(&tm);
+            if (now - entry_time < max_age_seconds) {
+                size_t colon_pos = entry.find_last_of(":");
                 if (colon_pos != std::string::npos) {
-                    std::string temp_str = line.substr(colon_pos + 1);
-                    // Удаляем лишние пробелы
-                    temp_str.erase(0, temp_str.find_first_not_of(' ')); 
+                    std::string temp_str = entry.substr(colon_pos + 1);
+                    temp_str.erase(0, temp_str.find_first_not_of(' '));
                     temp_str.erase(temp_str.find_last_not_of(' ') + 1);
 
-                    // Пробуем преобразовать строку в число
                     try {
                         double temp = std::stod(temp_str);
-                        temperatures.push_back(temp);
+                        sum += temp;
+                        count++;
                     } catch (const std::invalid_argument& e) {
                         std::cerr << "Failed to parse temperature: " << temp_str << " (invalid argument)" << std::endl;
                     } catch (const std::out_of_range& e) {
@@ -152,25 +146,15 @@ double calculateAverageTemperature(const std::string& logfile_name, int max_age_
         }
     }
 
-    if (temperatures.empty()) {
-        return 0.0;
-    }
-
-    double sum = 0.0;
-    for (double temp : temperatures) {
-        sum += temp;
-    }
-
-    return sum / temperatures.size();
+    return (count > 0) ? (sum / count) : 0.0;
 }
 
-// Функция для проверки, содержит ли строка нулевые байты
+// Проверка на наличие нулевых байтов в строке
 bool containsNullBytes(const std::string& str) {
     return str.find('\x00') != std::string::npos;
 }
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <port>" << std::endl;
         return -1;
@@ -185,7 +169,7 @@ int main(int argc, char** argv)
     std::string mystr;
     std::string avg_hour_str;
     std::string avg_day_str;
-    
+
     smport.SetTimeout(TIME_DELAY);
 
     int counter_avg_hour = 0;
@@ -194,7 +178,7 @@ int main(int argc, char** argv)
     for (;;) {
         smport >> mystr;
         if (!mystr.empty() && !containsNullBytes(mystr)) {
-            // Валидация данных: проверяем, что строка содержит только цифры, точку и минус
+            // Валидация данных
             bool is_valid = true;
             for (char ch : mystr) {
                 if (!isdigit(ch) && ch != '.' && ch != '-') {
@@ -202,35 +186,40 @@ int main(int argc, char** argv)
                     break;
                 }
             }
-            if (is_valid){
-                std::cout << "Got: " <<  mystr << std::endl;
-                writeToLog(mystr, "log_temp.log");
+            if (is_valid) {
+                std::cout << "Got: " << mystr << std::endl;
+                writeToLog(mystr, log_temp_memory); // Запись в память
             }
-            cleanOldEntries("log_temp.log", MAX_TIME_DEFAULT);
+            cleanOldEntries(log_temp_memory, MAX_TIME_DEFAULT); // Очистка старых записей
         } else {
-            std::cout << "Got" << " nothing" << std::endl;
+            std::cout << "Got nothing" << std::endl;
         }
 
         counter_avg_hour++;
         counter_avg_day++;
 
-        // Каждый час вычисляем среднее значение температуры за последний час секунд
-        if (counter_avg_hour >= HOUR){
-            avg_hour_str = to_string(calculateAverageTemperature("log_temp.log", HOUR));
-            writeToLog(avg_hour_str, "log_avg_temp_hour.log");
+        // Каждый час вычисляем среднее значение температуры за последний час
+        if (counter_avg_hour >= HOUR) {
+            avg_hour_str = to_string(calculateAverageTemperature(log_temp_memory, HOUR));
+            writeToLog(avg_hour_str, log_avg_temp_hour_memory); // Запись в память
             counter_avg_hour = 0;
-            cleanOldEntries("log_avg_temp_hour.log", MAX_TIME_HOUR);
+            cleanOldEntries(log_avg_temp_hour_memory, MAX_TIME_HOUR); // Очистка старых записей
         }
-        
 
         // Каждые 24 часа вычисляем среднее значение температуры за последний день
-        if (counter_avg_day >= DAY){
-            avg_day_str = to_string(calculateAverageTemperature("log_temp.log", DAY));
-            writeToLog(avg_day_str, "log_avg_temp_day.log");
+        if (counter_avg_day >= DAY) {
+            avg_day_str = to_string(calculateAverageTemperature(log_temp_memory, DAY));
+            writeToLog(avg_day_str, log_avg_temp_day_memory); // Запись в память
             counter_avg_day = 0;
-            cleanOldEntries("log_avg_temp_day.log", MAX_TIME_DAY);
+            cleanOldEntries(log_avg_temp_day_memory, MAX_TIME_DAY); // Очистка старых записей
         }
-        
+
+        // Синхронизация логов с диском каждую минуту
+        if (counter_avg_hour % 6 == 0) {
+            syncLogToDisk(log_temp_memory, "log_temp.log");
+            syncLogToDisk(log_avg_temp_hour_memory, "log_avg_temp_hour.log");
+            syncLogToDisk(log_avg_temp_day_memory, "log_avg_temp_day.log");
+        }
     }
 
     return 0;
